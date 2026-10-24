@@ -1492,7 +1492,6 @@ def close_tickets_after_n_days():
     for ticket in tickets_to_close:
         doc = frappe.get_doc("HD Ticket", ticket)
         doc.status = "Closed"
-        doc.flags.ignore_validate = True
         try:
             doc.save(ignore_permissions=True)
             # the status flip has a Version row; the reason is only recorded here

@@ -1,6 +1,8 @@
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
+from unittest.mock import patch
 
 import frappe
 from frappe.cache_manager import clear_doctype_map
@@ -442,6 +444,76 @@ def set_ticket_status_and_communication_date(ticket_name, status, communication_
             communication_date,
             update_modified=False,
         )
+
+
+@contextmanager
+def auto_close_feedback_settings():
+    """Use a unique resolved status so auto-close cannot select unrelated tickets."""
+    values = {
+        "auto_close_tickets": 1,
+        "auto_close_status": make_status(
+            f"Test Auto Close {frappe.generate_hash(length=10)}", "Resolved"
+        ).name,
+        "auto_close_after_days": 3,
+        "enable_email_ticket_feedback": 1,
+        "send_email_feedback_on_status": "Closed",
+        "is_feedback_mandatory": 1,
+        "send_acknowledgement_email": 0,
+    }
+    previous = {
+        field: frappe.db.get_single_value("HD Settings", field) for field in values
+    }
+    frappe.db.set_single_value("HD Settings", values)
+    frappe.clear_document_cache("HD Settings", "HD Settings")
+    try:
+        yield values["auto_close_status"]
+    finally:
+        frappe.db.set_single_value("HD Settings", previous)
+        frappe.clear_document_cache("HD Settings", "HD Settings")
+
+
+def make_auto_close_feedback_ticket(status, communication_date, **values):
+    """Create a synthetic resolved ticket with controlled inactivity and resolution."""
+    ticket = make_ticket(
+        subject=f"Auto-close feedback {frappe.generate_hash(length=10)}",
+        raised_by="auto-close-feedback@example.com",
+        priority="Medium",
+    )
+    communications = frappe.get_all(
+        "Communication",
+        filters={"reference_doctype": "HD Ticket", "reference_name": ticket.name},
+        pluck="name",
+    )
+    assert communications, "Synthetic ticket must have a communication"
+    set_ticket_status_and_communication_date(ticket.name, status, communication_date)
+    frappe.db.set_value(
+        "HD Ticket",
+        ticket.name,
+        {
+            "status_category": "Resolved",
+            "resolution_date": communication_date,
+            "resolution_time": 3600,
+            **values,
+        },
+        update_modified=False,
+    )
+    return ticket.reload()
+
+
+@contextmanager
+def auto_close_save_failure(ticket_name):
+    """Fail one synthetic ticket save without changing other ticket saves."""
+    from helpdesk.helpdesk.doctype.hd_ticket.hd_ticket import HDTicket
+
+    original_save = HDTicket.save
+
+    def save_ticket(ticket, *args, **kwargs):
+        if ticket.name == ticket_name:
+            raise frappe.ValidationError("Synthetic auto-close validation failure")
+        return original_save(ticket, *args, **kwargs)
+
+    with patch.object(HDTicket, "save", autospec=True, side_effect=save_ticket):
+        yield
 
 
 def create_contact(name, email, user=True, role="HD Customer"):
